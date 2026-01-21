@@ -1,113 +1,205 @@
 import streamlit as st
-import os
-import cv2
+import torch
+import torch.nn as nn
 import numpy as np
-from ultralytics import YOLO
+import cv2
+import os
+from PIL import Image
+from torchvision import transforms
+from torchvision.models import vgg16
 import tensorflow as tf
 import joblib
-from scipy.ndimage import gaussian_filter
 from collections import deque
+from scipy.ndimage import gaussian_filter
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# ---------------- CONFIG ----------------
-YOLO_PATH = os.path.join(BASE_DIR, "yolo_final_dense.pt")
-LSTM_PATH = os.path.join(BASE_DIR, "lstm", "risk_lstm.h5")
-SCALER_PATH = os.path.join(BASE_DIR, "lstm", "scaler.save")
-SEQ_LEN = 30
-# ----------------------------------------
-
-st.set_page_config(page_title="Crowd Safety AI", layout="wide")
-st.title("🚨 Crowd Density & Stampede Risk Monitoring System")
-
-# Load models
-@st.cache_resource
-def load_models():
-    yolo = YOLO(YOLO_PATH)
-    lstm = tf.keras.models.load_model(LSTM_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    return yolo, lstm, scaler
-
-yolo, lstm, scaler = load_models()
-
-# UI
-video_path = st.text_input(
-    "🎥 Video Path",
-    os.path.join(BASE_DIR, "videos", "crowd_test.mp4")
+# -------------------- PAGE CONFIG --------------------
+st.set_page_config(
+    page_title="Centinal | Crowd Safety Intelligence",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-start = st.button("▶️ Start Monitoring")
+# -------------------- CUSTOM CSS --------------------
+st.markdown("""
+<style>
+body {
+    background-color: #0e1117;
+    color: #fafafa;
+}
+.metric-card {
+    background: #161b22;
+    padding: 20px;
+    border-radius: 14px;
+    box-shadow: 0 0 20px rgba(0,0,0,0.4);
+    text-align: center;
+}
+.metric-title {
+    font-size: 14px;
+    color: #9ba3af;
+}
+.metric-value {
+    font-size: 28px;
+    font-weight: 600;
+}
+.status-safe { color: #22c55e; }
+.status-warning { color: #facc15; }
+.status-critical { color: #ef4444; }
+</style>
+""", unsafe_allow_html=True)
 
-frame_col, stats_col = st.columns([2, 1])
-frame_window = frame_col.empty()
-heatmap_window = frame_col.empty()
+# -------------------- PATHS --------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-count_box = stats_col.metric("👥 People Count", "0")
-risk_box = stats_col.empty()
+CSRNET_PATH = os.path.join(BASE_DIR, "csrnet_shanghai.pth")
+LSTM_PATH = os.path.join(BASE_DIR, "lstm", "risk_lstm.h5")
+SCALER_PATH = os.path.join(BASE_DIR, "lstm", "scaler.save")
 
+SEQ_LEN = 5
+
+# -------------------- CSRNET MODEL --------------------
+class CSRNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        vgg = vgg16(pretrained=False)
+        self.frontend = nn.Sequential(*list(vgg.features.children())[:23])
+        self.backend = nn.Sequential(
+            nn.Conv2d(512, 512, 3, padding=2, dilation=2),
+            nn.ReLU(),
+            nn.Conv2d(512, 512, 3, padding=2, dilation=2),
+            nn.ReLU(),
+            nn.Conv2d(512, 256, 3, padding=2, dilation=2),
+            nn.ReLU(),
+            nn.Conv2d(256, 128, 3, padding=2, dilation=2),
+            nn.ReLU(),
+            nn.Conv2d(128, 64, 3, padding=2, dilation=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 1, 1)
+        )
+
+    def forward(self, x):
+        return self.backend(self.frontend(x))
+
+# -------------------- LOAD MODELS --------------------
+@st.cache_resource
+def load_models():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    csrnet = CSRNet().to(device)
+    csrnet.load_state_dict(torch.load(CSRNET_PATH, map_location=device))
+    csrnet.eval()
+
+    lstm = tf.keras.models.load_model(LSTM_PATH)
+    scaler = joblib.load(SCALER_PATH)
+
+    return csrnet, lstm, scaler, device
+
+csrnet, lstm, scaler, device = load_models()
+
+# -------------------- SIDEBAR --------------------
+st.sidebar.title("Centinal")
+st.sidebar.caption("Crowd Safety Intelligence System")
+
+video_path = st.sidebar.text_input(
+    "Video Source",
+    value=os.path.join(BASE_DIR, "videos", "crowd_test.mp4")
+)
+
+start_btn = st.sidebar.button("▶ Start Monitoring")
+
+# -------------------- HEADER --------------------
+st.markdown("## 🚨 Live Crowd Risk Monitoring")
+
+frame_col, stats_col = st.columns([3, 1])
+
+frame_placeholder = frame_col.empty()
+heatmap_placeholder = frame_col.empty()
+
+# -------------------- METRIC CARDS --------------------
+with stats_col:
+    count_box = st.empty()
+    risk_box = st.empty()
+
+# -------------------- TRANSFORMS --------------------
+transform = transforms.ToTensor()
 sequence_buffer = deque(maxlen=SEQ_LEN)
 prev_density = 0
 
-# ---------------- RUN ----------------
-if start:
+# -------------------- RUN --------------------
+if start_btn:
     cap = cv2.VideoCapture(video_path)
 
-    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
+    if not cap.isOpened():
+        st.error(f"Error: Could not open video at path: {video_path}")
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        results = yolo(frame, conf=0.25)[0]
-        boxes = results.boxes.xyxy.cpu().numpy()
-        count = len(boxes)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb)
 
-        density = count / (W * H)
-        delta_density = density - prev_density
-        prev_density = density
+        input_tensor = transform(pil_img).unsqueeze(0).to(device)
 
-        # Heatmap
-        heatmap = np.zeros((H, W))
-        for x1, y1, x2, y2 in boxes:
-            cx, cy = int((x1+x2)/2), int((y1+y2)/2)
-            heatmap[cy-10:cy+10, cx-10:cx+10] += 1
+        with torch.no_grad():
+            density_map = csrnet(input_tensor)
 
-        heatmap = gaussian_filter(heatmap, sigma=15)
-        heatmap_norm = (heatmap / heatmap.max() * 255).astype(np.uint8) if heatmap.max() > 0 else heatmap.astype(np.uint8)
-        heatmap_colored = cv2.applyColorMap(heatmap_norm, cv2.COLORMAP_JET)
-        overlay = cv2.addWeighted(frame, 0.6, heatmap_colored, 0.4, 0)
+        density = density_map.squeeze().cpu().numpy()
+        count = int(density.sum())
 
-        # Feature vector
-        feature_vec = np.array([[count, density, delta_density, 0]])
-        sequence_buffer.append(feature_vec[0])
+        h, w = frame.shape[:2]
+        density_resized = cv2.resize(density, (w, h))
+        density_resized = gaussian_filter(density_resized, sigma=10)
 
-        # Risk prediction
+        avg_density = density.mean()
+        delta_density = avg_density - prev_density
+        prev_density = avg_density
+        spatial_variance = density.var()
+
+        features = np.array([[count, avg_density, delta_density, spatial_variance]])
+        sequence_buffer.append(features[0])
+
+        # ---- LSTM RISK ----
         risk_label = "SAFE"
-        color = "green"
+        risk_class = "status-safe"
 
         if len(sequence_buffer) == SEQ_LEN:
             seq = np.array(sequence_buffer)
             seq_scaled = scaler.transform(seq).reshape(1, SEQ_LEN, 4)
             pred = lstm.predict(seq_scaled, verbose=0)
-            risk_idx = np.argmax(pred)
+            idx = np.argmax(pred)
 
-            if risk_idx == 1:
+            if idx == 1:
                 risk_label = "WARNING"
-                color = "orange"
-            elif risk_idx == 2:
+                risk_class = "status-warning"
+            elif idx == 2:
                 risk_label = "CRITICAL"
-                color = "red"
+                risk_class = "status-critical"
 
-        # UI updates
-        count_box.metric("👥 People Count", count)
-        risk_box.markdown(
-            f"<h2 style='color:{color}'>⚠️ Risk Level: {risk_label}</h2>",
-            unsafe_allow_html=True
+        # ---- UI ----
+        heatmap = cv2.applyColorMap(
+            np.uint8(255 * density_resized / density_resized.max()),
+            cv2.COLORMAP_JET
         )
+        overlay = cv2.addWeighted(frame, 0.6, heatmap, 0.4, 0)
 
-        frame_window.image(frame, channels="BGR", caption="Live Feed")
-        heatmap_window.image(overlay, channels="BGR", caption="Density Heatmap")
+        frame_placeholder.image(frame, channels="BGR", caption="Live Feed")
+        heatmap_placeholder.image(overlay, channels="BGR", caption="Density Heatmap")
+
+        with stats_col:
+            count_box.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-title">Estimated Crowd Count</div>
+                <div class="metric-value">{count}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            risk_box.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-title">Risk Level</div>
+                <div class="metric-value {risk_class}">{risk_label}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     cap.release()
+
