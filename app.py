@@ -373,7 +373,6 @@ with stats_col:
     model_box = st.empty()
     count_box = st.empty()
     risk_box = st.empty()
-    confidence_box = st.empty()
 
 # ============================================================================
 # TRANSFORMS AND BUFFERS
@@ -496,12 +495,4 @@ if start_btn:
             </div>
             """, unsafe_allow_html=True)
 
-            confidence_box.markdown(f"""
-            <div class="decision-card">
-                <div class="decision-title">Stampede Risk</div>
-                <div class="decision-value">{lstm_confidence:.1%}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
     cap.release()
-
