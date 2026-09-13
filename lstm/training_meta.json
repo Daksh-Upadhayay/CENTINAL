@@ -1,0 +1,27 @@
+{
+  "seq_len": 30,
+  "n_features": 4,
+  "classes": [
+    "SAFE",
+    "WARNING",
+    "CRITICAL"
+  ],
+  "seed": 1337,
+  "epochs_requested": 80,
+  "density_pixels": 32400.000127392304,
+  "variance_ratio": 11.102679372095057,
+  "max_plausible_count": 1200.0,
+  "label_rule": {
+    "surge_rate": 0.015,
+    "turbulence_rate": 0.02,
+    "sparse_threshold": 80,
+    "medium_threshold": 250
+  },
+  "labels": "rule-derived from density dynamics, not human annotation",
+  "windows": {
+    "train": 22204,
+    "val": 4758,
+    "test": 4758
+  },
+  "test_accuracy": 0.992854118347168
+}

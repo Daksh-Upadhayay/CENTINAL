@@ -1,0 +1,23 @@
+# Core application
+streamlit
+opencv-python
+numpy
+Pillow
+
+# Crowd density estimation (CSRNet)
+torch
+torchvision
+
+# Temporal risk classification (LSTM)
+tensorflow
+joblib
+scikit-learn
+
+# Feature processing and evaluation
+scipy
+pandas
+matplotlib
+
+# NOTE: ultralytics is intentionally absent. yolo_final_dense.pt ships with the
+# repository but nothing in the codebase loads it -- counting is done by CSRNet.
+# Re-add ultralytics here if a YOLO detection path is reintroduced.

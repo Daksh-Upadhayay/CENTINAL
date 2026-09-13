@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+
+# Datasets are downloaded separately; see the README.
+data/
+ShanghaiTech*/
+.density_cache*/
