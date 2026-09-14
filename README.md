@@ -252,6 +252,10 @@ safeguards came out of it and are built into the script:
   setup disagrees with how the checkpoint was trained, and continuing would
   degrade the model. A density-scale mismatch did exactly that on the first
   attempt.
+- **Selection on validation data, not test data.** The current default was
+  chosen by an earlier version of the script that compared epochs on the
+  ShanghaiTech *test* sets, which makes its reported test scores mildly
+  optimistic. The script now holds out validation images for this.
 - **A normalised selection metric.** Checkpoints are chosen on mean
   *normalised* MAE — each split's MAE divided by its mean ground-truth count.
   Part A averages 434 people per image and Part B 124, so a plain mean of the
@@ -329,6 +333,8 @@ each with `train_data/` and `test_data/` containing `images/` and
 ```bash
 python eval/eval_csrnet.py --dataset_path /path/to/part_A_final/test_data --tag partA_centinal
 python eval/eval_csrnet.py --dataset_path /path/to/part_B_final/test_data --tag partB_centinal
+python eval/eval_csrnet.py --dataset_path /path/to/UCF-QNRF_ECCV18/Test --tag qnrf
+python eval/eval_csrnet.py --dataset_path /path/to/jhu_crowd_v2.0/test --tag jhu
 
 # The original checkpoint, for comparison
 python eval/eval_csrnet.py --model_path csrnet_shanghai.pth \
@@ -389,13 +395,21 @@ downloads the dataset, trains on a free T4, and saves checkpoints to Google
 Drive so a disconnect does not lose progress. On any CUDA machine:
 
 ```bash
-python train_csrnet.py --data_root /path/to/ShanghaiTech --part AB \
-    --preprocess raw --init_from csrnet_shanghai.pth
+python train_csrnet.py --data_root /path/to/datasets --datasets sha,shb,qnrf,jhu \
+    --preprocess raw --init_from csrnet_centinal.pth
 ```
 
-Trains on Part A and Part B together and selects checkpoints on **mean
-normalised MAE across both parts**, so an improvement on dense crowds cannot
-quietly cost accuracy on sparse ones.
+Supported datasets are ShanghaiTech A and B (`sha`, `shb`), UCF-QNRF (`qnrf`)
+and JHU-CROWD++ (`jhu`); their folders are found automatically under
+`--data_root`. Images larger than 2048 px or smaller than 512 px are resized
+into that range, matching the preprocessing the JHU-CROWD++ authors ship.
+JHU-CROWD++ is licensed for non-commercial use only.
+
+Checkpoints are selected on **validation** data — JHU-CROWD++'s official
+validation split, and a fixed 10% held out from the training sets of the
+others — using mean normalised MAE, so an improvement on one dataset cannot
+quietly cost accuracy on another. Test sets are only scored afterwards, with
+`eval/eval_csrnet.py`.
 
 Before the first epoch the script evaluates the starting checkpoint and prints
 the result. That number must match the checkpoint's known benchmark score; if it
@@ -416,6 +430,7 @@ CENTINAL/
 ├── colab/
 │   └── train_csrnet_colab.ipynb  # GPU training on Google Colab
 ├── centinal/
+│   ├── datasets.py           # Dataset discovery, annotations, image resizing
 │   ├── models.py             # CSRNet architecture, device + checkpoint loading
 │   ├── pipeline.py           # Preprocessing, features, risk inference
 │   ├── video.py              # Per-frame feature extraction over a video

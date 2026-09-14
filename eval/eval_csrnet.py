@@ -1,10 +1,14 @@
-"""Evaluate CSRNet crowd-counting accuracy on the ShanghaiTech benchmark.
+"""Evaluate CSRNet crowd-counting accuracy on a benchmark test split.
 
 Reports the standard counting metrics (MAE, RMSE) alongside MAPE and GAME,
 a localisation-aware metric that catches a model getting the right total for
-the wrong reasons.
+the wrong reasons. Point it at a test folder from ShanghaiTech, UCF-QNRF or
+JHU-CROWD++; the layout is detected automatically and images are resized with
+the same policy used in training (see centinal/datasets.py).
 
     python eval/eval_csrnet.py --dataset_path <...>/part_A_final/test_data
+    python eval/eval_csrnet.py --dataset_path <...>/UCF-QNRF_ECCV18/Test
+    python eval/eval_csrnet.py --dataset_path <...>/jhu_crowd_v2.0/test
 
 Pass --preprocess raw to reproduce the un-normalised preprocessing the
 pipeline used before ImageNet normalisation was applied.
@@ -17,34 +21,13 @@ import time
 
 import numpy as np
 import pandas as pd
-import scipy.io
 import torch
-from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from centinal.datasets import load_image_and_points, samples_for_split_dir  # noqa: E402
 from centinal.models import BASE_DIR, load_csrnet  # noqa: E402
 from centinal.pipeline import preprocess  # noqa: E402
-
-
-def load_ground_truth(mat_path: str) -> np.ndarray:
-    """Return the Nx2 array of annotated head coordinates."""
-    mat = scipy.io.loadmat(mat_path)
-    return np.asarray(mat["image_info"][0, 0][0][0][0], dtype=np.float64)
-
-
-def find_split_dirs(dataset_path: str):
-    """Locate the images/ground-truth directories of a ShanghaiTech split.
-
-    The official release names the annotation folder ``ground_truth`` while
-    some mirrors use ``ground-truth``; accept either.
-    """
-    images_dir = os.path.join(dataset_path, "images")
-    for candidate in ("ground_truth", "ground-truth"):
-        gt_dir = os.path.join(dataset_path, candidate)
-        if os.path.isdir(gt_dir):
-            return images_dir, gt_dir
-    return images_dir, None
 
 
 def game(pred_density: np.ndarray, gt_points: np.ndarray, image_shape, level: int) -> float:
@@ -55,8 +38,8 @@ def game(pred_density: np.ndarray, gt_points: np.ndarray, image_shape, level: in
     even when the global total happens to match. GAME(0) is equivalent to
     absolute count error.
 
-    ``gt_points`` are in original image coordinates while ``pred_density`` is
-    the downscaled CSRNet output, so each is binned against its own dimensions.
+    ``gt_points`` are in image coordinates while ``pred_density`` is the
+    downscaled CSRNet output, so each is binned against its own dimensions.
     """
     side = 2 ** level
     dh, dw = pred_density.shape
@@ -95,35 +78,27 @@ def main():
     output_dir = args.output_dir if os.path.isabs(args.output_dir) else os.path.join(BASE_DIR, args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    images_dir, gt_dir = find_split_dirs(args.dataset_path)
-    if not os.path.isdir(images_dir) or gt_dir is None:
-        print(f"Error: expected 'images' and 'ground_truth' directories under {args.dataset_path}")
+    try:
+        kind, samples = samples_for_split_dir(args.dataset_path)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
         return 1
-
-    image_files = sorted(f for f in os.listdir(images_dir) if f.lower().endswith((".jpg", ".jpeg", ".png")))
     if args.limit:
-        image_files = image_files[: args.limit]
-    if not image_files:
-        print(f"No images found in {images_dir}")
+        samples = samples[: args.limit]
+    if not samples:
+        print(f"No annotated images found in {args.dataset_path}")
         return 1
 
     model, device, meta = load_csrnet(model_path)
     mode = args.preprocess or meta["preprocess"]
-    print(f"Device: {device} | preprocessing: {mode} | images: {len(image_files)}")
+    print(f"Device: {device} | preprocessing: {mode} | layout: {kind} | images: {len(samples)}")
 
     rows = []
     inference_ms = []
-    for idx, img_name in enumerate(image_files):
-        base = os.path.splitext(img_name)[0]
-        gt_path = os.path.join(gt_dir, f"GT_{base}.mat")
-        if not os.path.exists(gt_path):
-            print(f"  skipping {img_name}: no ground truth")
-            continue
-
-        points = load_ground_truth(gt_path)
+    for idx, sample in enumerate(samples):
+        pil_image, points = load_image_and_points(sample)
         gt_count = len(points)
-
-        image = np.array(Image.open(os.path.join(images_dir, img_name)).convert("RGB"))
+        image = np.array(pil_image)
         tensor = preprocess(image, device, mode)
 
         start = time.perf_counter()
@@ -131,6 +106,8 @@ def main():
             density_map = model(tensor)
         if device.type == "mps":
             torch.mps.synchronize()
+        elif device.type == "cuda":
+            torch.cuda.synchronize()
         inference_ms.append((time.perf_counter() - start) * 1000)
 
         density = density_map.squeeze().cpu().numpy()
@@ -138,18 +115,19 @@ def main():
         image_shape = image.shape[:2]
 
         rows.append({
-            "Image": img_name,
+            "Image": os.path.basename(sample.image_path),
             "Ground_Truth": gt_count,
             "Prediction": pred_count,
             "Absolute_Error": abs(pred_count - gt_count),
             "Squared_Error": (pred_count - gt_count) ** 2,
-            "Percentage_Error": abs(pred_count - gt_count) / gt_count * 100 if gt_count else 0.0,
-            "GAME_1": game(density, points, image_shape, 1) if gt_count else 0.0,
-            "GAME_2": game(density, points, image_shape, 2) if gt_count else 0.0,
+            # Undefined for images with nobody in them (JHU-CROWD++ has a few).
+            "Percentage_Error": abs(pred_count - gt_count) / gt_count * 100 if gt_count else np.nan,
+            "GAME_1": game(density, points, image_shape, 1),
+            "GAME_2": game(density, points, image_shape, 2),
         })
 
-        if (idx + 1) % 40 == 0 or (idx + 1) == len(image_files):
-            print(f"  [{idx + 1}/{len(image_files)}]", flush=True)
+        if (idx + 1) % 40 == 0 or (idx + 1) == len(samples):
+            print(f"  [{idx + 1}/{len(samples)}]", flush=True)
 
     if not rows:
         print("No images evaluated.")

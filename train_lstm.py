@@ -198,14 +198,14 @@ def windows_from_track(track, seq_len, measurement_jitter, stride=1):
 # Dataset assembly
 # ---------------------------------------------------------------------------
 
-def calibrate_from_video(video_path, max_frames, verbose=True):
+def calibrate_from_video(video_path, max_frames, csrnet_path=None, verbose=True):
     """Measure the real pipeline's feature scales so synthetic data matches it.
 
     Returns ``(density_pixels, variance_ratio, measurement_jitter, real_track)``.
     """
     from centinal.video import extract_video_features
 
-    model, device, meta = load_csrnet()
+    model, device, meta = load_csrnet(csrnet_path) if csrnet_path else load_csrnet()
     if verbose:
         print(f"Calibrating on {os.path.basename(video_path)} "
               f"(device: {device}, input: {meta['preprocess']})")
@@ -275,6 +275,9 @@ def main():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--out_dir", type=str, default="lstm")
+    parser.add_argument("--csrnet_path", type=str, default=None,
+                        help="Density model to calibrate against (default: the app's default). "
+                             "The classifier must be calibrated on the same model it will run with.")
     parser.add_argument("--skip_calibration", action="store_true",
                         help="Use nominal 1080p feature scales instead of running CSRNet")
     args = parser.parse_args()
@@ -296,7 +299,7 @@ def main():
               f"and {measurement_jitter * 100:.1f}% counting noise.")
     else:
         density_pixels, variance_ratio, measurement_jitter, _ = calibrate_from_video(
-            video_path, args.calib_frames)
+            video_path, args.calib_frames, args.csrnet_path)
 
     splits = build_dataset(rng, density_pixels, variance_ratio, measurement_jitter,
                            args.tracks, args.track_frames, SEQ_LEN)
@@ -373,6 +376,7 @@ def main():
         "variance_ratio": variance_ratio,
         "max_plausible_count": MAX_PLAUSIBLE_COUNT,
         "measurement_jitter": measurement_jitter,
+        "csrnet_path": os.path.basename(args.csrnet_path) if args.csrnet_path else "default",
         "label_rule": {"surge_rate": SURGE_RATE, "turbulence_ratio": TURBULENCE_RATIO,
                        "sparse_threshold": SPARSE_THRESHOLD, "medium_threshold": MEDIUM_THRESHOLD},
         "labels": "rule-derived from density dynamics, not human annotation",
