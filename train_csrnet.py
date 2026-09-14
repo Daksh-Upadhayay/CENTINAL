@@ -1,6 +1,6 @@
 """Fine-tune CSRNet on ShanghaiTech.
 
-The shipped ``csrnet_shanghai.pth`` scores far worse than the published CSRNet
+The original ``csrnet_shanghai.pth`` scores far worse than the published CSRNet
 result on ShanghaiTech Part A, and its VGG frontend is still almost exactly at
 ImageNet initialisation -- consistent with a short training run in which the
 backend learned to read un-normalised inputs and the frontend never adapted.

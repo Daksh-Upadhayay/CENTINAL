@@ -58,50 +58,80 @@ clearly-labelled reference rows.
 
 Benchmarked on the **ShanghaiTech Part A and Part B test splits** (182 and 316
 images). Part A is dense crowds (mean 434 people per image); Part B is sparse to
-moderate street scenes (mean 123).
+moderate street scenes (mean 124).
 
-| Split | Images | MAE ↓ | RMSE ↓ | MAPE | GAME(1) | GAME(2) |
+| Model | Split | MAE ↓ | RMSE ↓ | MAPE | GAME(1) | GAME(2) |
 |---|---|---|---|---|---|---|
-| Part A (dense) | 182 | **136.60** | 226.24 | 30.1% | 144.97 | 157.12 |
-| Part B (sparse/medium) | 316 | **14.28** | 21.04 | 12.1% | 17.13 | 22.35 |
-| *CSRNet paper, Part A* | *182* | *68.2* | *115.0* | — | — | — |
-| *CSRNet paper, Part B* | *316* | *10.6* | *16.0* | — | — | — |
+| **`csrnet_centinal.pth`** (default) | Part A (dense) | **72.98** | **110.73** | 19.3% | 83.87 | 99.04 |
+| **`csrnet_centinal.pth`** (default) | Part B (sparse/medium) | **13.38** | 22.77 | 15.0% | 20.53 | 28.17 |
+| `csrnet_shanghai.pth` (original) | Part A | 136.60 | 226.24 | 30.1% | 144.97 | 157.12 |
+| `csrnet_shanghai.pth` (original) | Part B | 14.28 | 21.04 | 12.1% | 17.13 | 22.35 |
+| *CSRNet paper* | *Part A* | *68.2* | *115.0* | — | — | — |
+| *CSRNet paper* | *Part B* | *10.6* | *16.0* | — | — | — |
 
 MAE and RMSE are counting errors in people. MAPE is the mean per-image
 percentage error. **GAME(L)** is Grid Average Mean Error: the frame is split
 into a 4^L grid and per-cell absolute errors are summed, so a prediction that
 gets the total right by putting people in the wrong places is still penalised.
-GAME rising above MAE (145 vs 137 on Part A) is the expected signature of some
-spatial smearing in the density map.
 
-**Read this before trusting the counting stage.** The bundled checkpoint is
-*not* uniformly weak — it is weak in one specific regime:
+The default model is the original checkpoint fine-tuned on both parts (see
+[Fine-tuning](#4-fine-tuning-the-density-estimator)). It halves dense-crowd
+error and is now close to the published CSRNet result on Part A. On Part B its
+MAE is slightly better, but RMSE, MAPE and GAME are worse — the reason is
+below.
 
-- On **Part B** it is close to the published CSRNet result (14.3 against 10.6).
-- On **Part A** it is roughly **2× worse** than published (136.6 against 68.2).
+#### Where the error is
 
-In other words it behaves like a model tuned for sparse and moderate crowds.
-That is the opposite of where CENTINAL needs it: the scene gate only permits a
-CRITICAL alarm at counts ≥ 250, which is exactly the density range where the
-counting error is largest. A mean absolute error of ~137 people on a frame
-holding ~434 is not a sound basis for an automated evacuation decision, and the
-system should not be deployed as one.
+Averages hide the pattern that matters. Pooling both test splits (498 images)
+and grouping by the true crowd size:
+
+| True count | Images | Original: MAE / bias | Default: MAE / bias |
+|---|---|---|---|
+| under 80 | 138 | 7.0 / −5.3 | 9.1 / +5.0 |
+| 80–249 | 216 | 27.4 / −22.4 | 19.6 / +4.5 |
+| 250–499 | 95 | 86.3 / −64.0 | 62.2 / +4.5 |
+| 500–999 | 30 | 170.7 / −150.5 | 84.2 / −13.5 |
+| 1,000+ | 19 | 482.4 / −347.6 | 188.6 / −114.3 |
+
+The original model **undercounted systematically, and worse the bigger the
+crowd** — the dangerous direction for a safety system, because it makes dense
+crowds look calmer than they are. The default model is close to unbiased up to
+about 500 people. It still undercounts the very largest crowds.
+
+That shows up directly in the scene gate, which buckets frames by count:
+
+| | Original | Default |
+|---|---|---|
+| Frames placed in the correct scene bucket | 85.7% | **90.6%** |
+| Truly SPARSE frames kept SPARSE | **99.3%** | 92.0% |
+| Truly MEDIUM frames kept MEDIUM | 85.2% | **93.5%** |
+| Truly DENSE frames kept DENSE | 73.6% | **84.7%** |
+| Dense frames pushed below 250, where CRITICAL cannot fire | 38 of 144 | **22 of 144** |
+
+The one regression is at the sparse end: the default model slightly overcounts
+near-empty scenes, so 11 of 138 truly sparse frames are promoted to MEDIUM and
+can produce a WARNING. That costs false advisories rather than missed danger,
+which is the cheaper error for this application.
+
+**This is still not a basis for automated evacuation decisions.** 22 of 144
+genuinely dense test images land below the CRITICAL gate, and crowds over 1,000
+are undercounted by more than 100 people on average.
 
 #### Input scaling is a property of the checkpoint
 
 CSRNet's frontend is an ImageNet-pretrained VGG16, which would normally imply
-ImageNet-normalised input. For this checkpoint that is measurably wrong:
+ImageNet-normalised input. For the original checkpoint that is measurably wrong:
 
 | Split | Raw `ToTensor` (`[0,1]`) | ImageNet-normalised |
 |---|---|---|
 | Part A MAE | **136.60** | 181.63 |
 | Part B MAE | **14.28** | 52.42 |
 
-The bundled weights were trained on un-normalised tensors, so that is what they
-must be fed. Because guessing wrong costs up to 3.7× the error, the scaling mode
-is now stored *inside* the checkpoint and read back by `load_csrnet()` rather
-than assumed at each call site. Reproduce the comparison with
-`--preprocess raw|imagenet`.
+It was trained on un-normalised tensors, and the fine-tuned default continues
+from it with the same convention. Because guessing wrong costs up to 3.7× the
+error, the scaling mode is stored *inside* each checkpoint and read back by
+`load_csrnet()` rather than assumed at each call site. Reproduce the comparison
+with `--preprocess raw|imagenet`.
 
 ### 2. Risk classification (LSTM)
 
@@ -112,39 +142,59 @@ near-duplicates on both sides and inflate these numbers.
 
 | Class | Precision | Recall | F1 | Support |
 |---|---|---|---|---|
-| SAFE | 0.998 | 0.993 | 0.996 | 1,518 |
-| WARNING | 0.994 | 0.987 | 0.991 | 1,827 |
-| CRITICAL | 0.985 | **1.000** | 0.993 | 1,413 |
-| **Macro avg** | **0.993** | **0.993** | **0.993** | 4,758 |
+| SAFE | 0.978 | 0.977 | 0.977 | 2,686 |
+| WARNING | 0.942 | 0.936 | 0.939 | 1,478 |
+| CRITICAL | 0.944 | 0.963 | 0.953 | 594 |
+| **Macro avg** | **0.955** | **0.959** | **0.957** | 4,758 |
 
-Accuracy **0.9929**, macro F1 **0.9930**. Classes are close to balanced
-(32/38/30), so accuracy and macro F1 agree. Confusion matrix, rows = truth:
+Accuracy **0.962**, macro F1 **0.957**. The classes are imbalanced (56 / 31 /
+12%), so macro F1 is the number to watch. Confusion matrix, rows = truth:
 
 ```
              SAFE  WARN  CRIT
-SAFE         1508    10     0
-WARNING         3  1803    21
-CRITICAL        0     0  1413
+SAFE         2623    63     0
+WARNING        60  1384    34
+CRITICAL        0    22   572
 ```
 
-No CRITICAL window is missed (recall 1.000), and no SAFE window is ever called
-CRITICAL — the two failure modes that matter most in a safety system. Errors sit
-on the boundary between adjacent classes, which is where a thresholded rule is
-inherently ambiguous. Confidence is informative rather than flat: **0.990 on
-correct predictions versus 0.824 on incorrect ones**, so the confidence gate in
-`compute_risk()` is doing real work.
+No CRITICAL window is ever called SAFE and no SAFE window is ever called
+CRITICAL. The misses that do happen are between neighbouring classes: 22 of 594
+CRITICAL windows (3.7%) are downgraded to WARNING. Confidence is informative:
+**0.983 on correct predictions versus 0.800 on incorrect ones**, so the
+confidence gate in `compute_risk()` is doing real work.
+
+**How "turbulence" is defined.** CSRNet's count wobbles from frame to frame
+even when nothing in the scene changes — about 3% per frame on the sample video.
+A crowd is labelled turbulent only when its frame-to-frame variability is 1.6×
+what that counting noise alone would produce, and the noise level is measured
+on the calibration video by `train_lstm.py`.
+
+That definition replaces an earlier absolute threshold, which sat *below* the
+counting noise. Every dense crowd therefore looked turbulent and was labelled
+CRITICAL, so the classifier learned "dense means CRITICAL" and scored 99.3% on
+held-out data because that task was trivially easy. The flaw stayed hidden
+while the original counting model undercounted the sample video into the MEDIUM
+band, where risk is capped at WARNING. Once the fine-tuned model counted it
+correctly, an ordinary daytime crowd in Times Square was flagged CRITICAL on
+every frame. The lower score above belongs to a harder and more meaningful task.
+
+**On the sample video** the pipeline now reports WARNING on all 330 windows —
+a dense but stable crowd — with mean confidence 0.993, including the 209 frames
+that were never used for calibration. That shows the false alarm is gone on
+calm footage from this camera. No surge footage is available, so nothing here
+shows that CRITICAL fires correctly on a real surge.
 
 > **What these numbers do and do not mean.** There is no annotated stampede
 > dataset here. Labels come from an explicit rule over the density signal —
-> crowd level, rate of change, and turbulence — defined in `label_window()` in
-> [`train_lstm.py`](train_lstm.py). So this table says the network **reproduces
-> that rule on unseen scenarios with 99.3% macro F1**. It does *not* say the
-> system predicts real stampedes with 99.3% accuracy, and no claim of that kind
-> is supported by anything in this repository. The rule reads only observable
-> density features and never the model's own output, so the evaluation is at
-> least not circular — an earlier version of this evaluation derived its
-> "ground truth" from the LSTM's own prediction and could only ever report
-> agreement with itself.
+> crowd level, rate of change, and turbulence relative to counting noise —
+> defined in `label_window()` in [`train_lstm.py`](train_lstm.py). So this table
+> says the network **reproduces that rule on unseen scenarios with 95.7% macro
+> F1**. It does *not* say the system predicts real stampedes with that accuracy,
+> and no claim of that kind is supported by anything in this repository. The
+> rule reads only observable density features and never the model's own output,
+> so the evaluation is at least not circular — an earlier version of this
+> evaluation derived its "ground truth" from the LSTM's own prediction and could
+> only ever report agreement with itself.
 >
 > To score against real labels, use `--mode manual` with your own frame-level
 > annotations.
@@ -156,73 +206,58 @@ warm-up frames, using `eval/eval_runtime.py`.
 
 | Stage | mean ms | p50 | p95 | % of frame |
 |---|---|---|---|---|
-| Frame prep | 7.00 | 5.35 | 15.47 | 0.7% |
-| **CSRNet inference** | **793.98** | 708.01 | 1220.38 | **81.2%** |
-| Feature extraction | 0.50 | 0.38 | 0.86 | 0.1% |
-| LSTM inference | 88.10 | 123.15 | 166.28 | 9.0% |
-| Heatmap generation | 88.69 | 81.69 | 112.43 | 9.1% |
-| **Total** | **978.32** | 910.95 | 1476.95 | |
+| Frame prep | 5.46 | 5.13 | 8.70 | 0.5% |
+| **CSRNet inference** | **925.01** | 922.00 | 983.89 | **85.1%** |
+| Feature extraction | 0.22 | 0.19 | 0.35 | 0.0% |
+| LSTM inference | 76.41 | 119.72 | 141.48 | 7.0% |
+| Heatmap generation | 79.72 | 78.78 | 83.48 | 7.3% |
+| **Total** | **1086.84** | 1137.17 | 1202.98 | |
 
-**Throughput: 1.06 FPS** (0.64 min, 1.30 max). Peak Python heap 48.2 MB.
+**Throughput: 0.93 FPS** (0.80 min, 1.09 max). Peak Python heap 48.2 MB.
+Fine-tuning changed only the weights, not the architecture, so the per-frame
+cost is the same as the original model's.
 
-For comparison, the same pipeline previously measured **0.13 FPS** with CSRNet
-at 6,916 ms per frame, because device selection tested only for CUDA and so fell
+For comparison, the pipeline previously measured **0.13 FPS** with CSRNet at
+6,916 ms per frame, because device selection tested only for CUDA and so fell
 back to CPU on Apple hardware. Selecting MPS accounts for almost all of the
 difference; outputs are identical to CPU within floating-point noise (max
 relative difference 1.7e-7).
 
-**This is not real time, and the README should not claim otherwise.** At 1 FPS
-against 24 FPS source footage, CENTINAL processes roughly one frame in
-twenty-four. The `--frame stride` control in the dashboard exists to make that
-explicit rather than silently accumulating lag. CSRNet dominates at 81% of the
-frame budget, so it is the only stage worth optimising; the remaining stages
-together account for under 20%.
+**This is not real time.** At under 1 FPS against 24 FPS source footage,
+CENTINAL processes roughly one frame in twenty-six. The frame stride control
+in the dashboard exists to make that explicit rather than silently accumulating
+lag. CSRNet takes 85% of the frame budget, so it is the only stage worth
+optimising.
 
-Note that the LSTM stage is 88 ms here only because it runs on every frame. It
-was previously far worse -- the profiler recorded a 548 ms mean and 2,739 ms
-maximum -- because the pipeline called `model.predict()` per frame, which
-rebuilds Keras' batched execution loop on each call. A direct `model(x,
-training=False)` call removed that overhead.
+The LSTM costs about 120 ms per frame once its 30-frame window has filled (the
+mean is lower because the first frames of the run skip it). It was previously
+far worse — a 548 ms mean and 2,739 ms maximum — because the pipeline called
+`model.predict()` per frame, which rebuilds Keras' batched execution loop on
+each call. A direct `model(x, training=False)` call removed that overhead.
 
 ### 4. Fine-tuning the density estimator
 
-`train_csrnet.py` fine-tunes CSRNet on Part A and Part B together. A time-boxed
-run (6 epochs, Adam at 1e-5, ~32 minutes on MPS) produced this:
+`train_csrnet.py` fine-tunes the original checkpoint on Part A and Part B
+together. The default model came from a run on a Colab T4 GPU using
+[`colab/train_csrnet_colab.ipynb`](colab/train_csrnet_colab.ipynb); the best
+checkpoint was reached at **epoch 48**. Results are in the tables above and
+were reproduced independently on a second machine with identical numbers.
 
-| Epoch | Part A MAE | Part B MAE | Normalised score ↓ |
-|---|---|---|---|
-| 0 (bundled checkpoint) | 136.66 | 14.09 | 0.214 |
-| 1 | 103.42 | 46.72 | 0.308 |
-| **2** | **94.73** | 21.91 | **0.198** |
-| 3 | 130.80 | 37.58 | 0.302 |
-| 4 | 94.96 | 29.48 | 0.228 |
-| 5 | 133.08 | 19.96 | 0.234 |
+An earlier six-epoch run on Apple Silicon (about six minutes per epoch) did not
+converge — scores swung by more between epochs than the improvement itself. Two
+safeguards came out of it and are built into the script:
 
-The best epoch cuts dense-crowd error by **31%** (136.66 → 94.73) but raises
-sparse-crowd error by **55%** (14.09 → 21.91). That checkpoint is saved as
-`csrnet_centinal.pth`; **`csrnet_shanghai.pth` remains the default** so the
-shipped behaviour does not change without a deliberate decision. Point
-`load_csrnet()` at the other file to switch.
-
-Two things are worth saying plainly about this result:
-
-1. **It is a trade, not a free win.** Whether it is the right trade depends on
-   which regime matters more for a given deployment. CENTINAL only permits a
-   CRITICAL alarm above 250 people, which argues for the dense-accurate model;
-   everyday monitoring happens in the sparse-to-medium range, which argues the
-   other way.
-2. **It has not converged.** Scores oscillate by more than the improvement
-   between consecutive epochs, which means the run is under-trained and the
-   learning rate too high for this stage. These numbers are a promising
-   direction, not a finished model. A longer run at a lower learning rate is
-   the obvious next step.
-
-**Selection metric.** Checkpoints are chosen on mean *normalised* MAE -- each
-split's MAE divided by its mean ground-truth count. Part A averages 434 people
-per image and Part B 124, so a plain mean of the two MAEs is dominated by Part
-A. Under that naive metric epoch 1 above scores "better than baseline" (75.07
-against 75.38) even though it nearly quadrupled Part B error. Normalising
-correctly identifies it as a regression.
+- **An epoch-0 check.** Before training, the script scores the starting
+  checkpoint. If that does not match its known benchmark result, the training
+  setup disagrees with how the checkpoint was trained, and continuing would
+  degrade the model. A density-scale mismatch did exactly that on the first
+  attempt.
+- **A normalised selection metric.** Checkpoints are chosen on mean
+  *normalised* MAE — each split's MAE divided by its mean ground-truth count.
+  Part A averages 434 people per image and Part B 124, so a plain mean of the
+  two MAEs is dominated by Part A. Under that naive metric, one epoch of the
+  local run scored "better than baseline" (75.07 against 75.38) while nearly
+  quadrupling Part B error.
 
 ---
 
@@ -230,25 +265,31 @@ correctly identifies it as a regression.
 
 These are measured or structural, not hypothetical.
 
-1. **Counting accuracy collapses on dense crowds.** MAE ~137 people on Part A.
-   The CRITICAL alarm is gated on counts ≥ 250, so the alarm depends on the
-   least reliable part of the count range. This is the single biggest obstacle
-   to the system being trustworthy.
+1. **The largest crowds are still undercounted.** Crowds over 1,000 are
+   undercounted by 114 people on average, and 22 of 144 dense test images land
+   below the count at which CRITICAL can fire.
 2. **Risk labels are rule-derived.** The LSTM reproduces a hand-written rule,
    it has never seen a real stampede, and its reported scores inherit every
-   assumption in that rule.
-3. **The scene thresholds are absolute counts**, not densities per unit area.
+   assumption in that rule — including the 1.6× turbulence threshold, which is
+   a judgement, not a measurement.
+3. **Calibration assumes a calm crowd.** Turbulence is measured against the
+   counting noise on the calibration video. Calibrating on footage of a genuine
+   surge would teach the rule that surging is normal. The sample video is an
+   ordinary busy street scene.
+4. **Near-empty scenes are slightly overcounted.** About 8% of truly sparse
+   frames are promoted to MEDIUM, which can produce an unnecessary WARNING.
+5. **The scene thresholds are absolute counts**, not densities per unit area.
    They are tied to a particular camera placement and field of view; a wider or
    narrower shot changes what "80" and "250" mean.
-4. **A WARNING in a MEDIUM scene is ambiguous by construction.** The rules emit
+6. **A WARNING in a MEDIUM scene is ambiguous by construction.** The rules emit
    WARNING both when the model confidently predicts elevated risk and when it is
    not confident enough to be trusted. Those are different situations.
-5. **`yolo_final_dense.pt` is unused.** It ships in the repository but nothing
+7. **`yolo_final_dense.pt` is unused.** It ships in the repository but nothing
    loads it; counting is done entirely by CSRNet. Earlier documentation credited
    YOLOv8 for people counting, which never matched the code.
-6. **Single-video calibration.** The LSTM's feature scaling is calibrated from
-   one clip at one resolution. Deploying against a different camera should mean
-   re-running `train_lstm.py`.
+8. **Single-camera calibration.** Feature scaling and counting noise are
+   calibrated from one clip at one resolution. Deploying against a different
+   camera should mean re-running `train_lstm.py` on footage from it.
 
 ---
 
@@ -286,12 +327,16 @@ each with `train_data/` and `test_data/` containing `images/` and
 `ground_truth/`.
 
 ```bash
-python eval/eval_csrnet.py --dataset_path /path/to/part_A_final/test_data --tag partA
-python eval/eval_csrnet.py --dataset_path /path/to/part_B_final/test_data --tag partB
+python eval/eval_csrnet.py --dataset_path /path/to/part_A_final/test_data --tag partA_centinal
+python eval/eval_csrnet.py --dataset_path /path/to/part_B_final/test_data --tag partB_centinal
+
+# The original checkpoint, for comparison
+python eval/eval_csrnet.py --model_path csrnet_shanghai.pth \
+    --dataset_path /path/to/part_A_final/test_data --tag partA_shanghai
 
 # Compare input scaling conventions
-python eval/eval_csrnet.py --dataset_path /path/to/part_A_final/test_data \
-    --tag partA --preprocess imagenet
+python eval/eval_csrnet.py --model_path csrnet_shanghai.pth \
+    --dataset_path /path/to/part_A_final/test_data --tag partA_shanghai --preprocess imagenet
 ```
 
 Writes per-image CSVs and a ground-truth-versus-prediction scatter plot to
@@ -327,21 +372,30 @@ python eval/eval_runtime.py --frames 100 --device cpu   # compare backends
 python train_lstm.py --video videos/crowd_test.mp4 --epochs 80
 ```
 
-Runs CSRNet over the video to calibrate feature scales, generates labelled
-scenario tracks, fits the scaler **on the training split only**, trains with
-class weighting, and writes `lstm/risk_lstm.h5`, `lstm/scaler.save`, the
-held-out split `lstm/risk_testset.npz` and `lstm/training_meta.json`.
+Runs CSRNet over the first 120 frames of the video to calibrate feature scales
+and measure the counting noise, generates labelled scenario tracks, fits the
+scaler **on the training split only**, trains with class weighting, and writes
+`lstm/risk_lstm.h5`, `lstm/scaler.save`, the held-out split
+`lstm/risk_testset.npz` and `lstm/training_meta.json`. Use footage of a calm
+crowd from the camera you intend to deploy on, and rerun this whenever the
+counting model changes.
 
 ### Crowd counting
+
+Training needs a GPU; a single epoch takes about six minutes on Apple Silicon.
+The easiest route is the Colab notebook,
+[`colab/train_csrnet_colab.ipynb`](colab/train_csrnet_colab.ipynb), which
+downloads the dataset, trains on a free T4, and saves checkpoints to Google
+Drive so a disconnect does not lose progress. On any CUDA machine:
 
 ```bash
 python train_csrnet.py --data_root /path/to/ShanghaiTech --part AB \
     --preprocess raw --init_from csrnet_shanghai.pth
 ```
 
-Trains on Part A and Part B together and selects checkpoints on **mean MAE
-across both parts**, so an improvement on dense crowds cannot quietly cost
-accuracy on sparse ones.
+Trains on Part A and Part B together and selects checkpoints on **mean
+normalised MAE across both parts**, so an improvement on dense crowds cannot
+quietly cost accuracy on sparse ones.
 
 Before the first epoch the script evaluates the starting checkpoint and prints
 the result. That number must match the checkpoint's known benchmark score; if it
@@ -359,6 +413,8 @@ CENTINAL/
 ├── app.py                    # Streamlit dashboard
 ├── train_lstm.py             # Trains the risk classifier
 ├── train_csrnet.py           # Fine-tunes the density estimator
+├── colab/
+│   └── train_csrnet_colab.ipynb  # GPU training on Google Colab
 ├── centinal/
 │   ├── models.py             # CSRNet architecture, device + checkpoint loading
 │   ├── pipeline.py           # Preprocessing, features, risk inference
@@ -374,7 +430,9 @@ CENTINAL/
 │   ├── scaler.save           # Feature scaler (fitted on training split only)
 │   ├── risk_testset.npz      # Held-out evaluation split
 │   └── training_meta.json    # Training configuration and label rule
-├── csrnet_shanghai.pth       # Density estimator weights
+├── csrnet_centinal.pth       # Density estimator, fine-tuned (default)
+├── csrnet_shanghai.pth       # Density estimator, original (for comparison)
+├── yolo_final_dense.pt       # Unused; see Known limitations
 └── videos/crowd_test.mp4     # Sample footage
 ```
 

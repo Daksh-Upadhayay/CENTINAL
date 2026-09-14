@@ -8,12 +8,13 @@
   ],
   "seed": 1337,
   "epochs_requested": 80,
-  "density_pixels": 32400.000127392304,
-  "variance_ratio": 11.102679372095057,
+  "density_pixels": 32400.000055682223,
+  "variance_ratio": 4.743899173006355,
   "max_plausible_count": 1200.0,
+  "measurement_jitter": 0.029926422362857794,
   "label_rule": {
     "surge_rate": 0.015,
-    "turbulence_rate": 0.02,
+    "turbulence_ratio": 1.6,
     "sparse_threshold": 80,
     "medium_threshold": 250
   },
@@ -23,5 +24,5 @@
     "val": 4758,
     "test": 4758
   },
-  "test_accuracy": 0.992854118347168
+  "test_accuracy": 0.9623791575431824
 }

@@ -82,7 +82,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate CSRNet on ShanghaiTech")
     parser.add_argument("--dataset_path", type=str, required=True,
                         help="Path to a ShanghaiTech split, e.g. part_A_final/test_data")
-    parser.add_argument("--model_path", type=str, default="csrnet_shanghai.pth")
+    parser.add_argument("--model_path", type=str, default="csrnet_centinal.pth")
     parser.add_argument("--output_dir", type=str, default="eval/results")
     parser.add_argument("--preprocess", choices=["imagenet", "raw"], default=None,
                         help="Override the input scaling. Defaults to whatever the checkpoint declares.")

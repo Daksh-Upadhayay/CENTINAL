@@ -19,10 +19,11 @@ from torchvision import transforms
 
 # A CSRNet checkpoint is only valid under the input scaling it was trained with,
 # so the mode travels with the weights rather than being assumed at the call
-# site. The bundled csrnet_shanghai.pth was trained on un-normalised [0, 1]
+# site. The original csrnet_shanghai.pth was trained on un-normalised [0, 1]
 # tensors ("raw"); measured on ShanghaiTech it scores MAE 136.6 / 14.3 on
-# parts A / B that way versus 181.6 / 52.4 under ImageNet statistics. Models
-# trained by train_csrnet.py use "imagenet".
+# parts A / B that way versus 181.6 / 52.4 under ImageNet statistics. The
+# fine-tuned csrnet_centinal.pth continues from it and is also "raw". Checkpoints
+# saved by train_csrnet.py record whichever mode they were trained with.
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 

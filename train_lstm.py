@@ -21,6 +21,14 @@ network reproduces the rule on held-out scenarios, and the README says so.
 Crucially the rule reads only observable density features, never the model's
 own output, so evaluation is not circular.
 
+Calibration assumption
+----------------------
+CSRNet's count wobbles from frame to frame even when nothing in the scene
+changes. "Turbulence" is therefore measured relative to that wobble, and the
+wobble is measured on the calibration video. The calibration clip must show a
+calm crowd: calibrating on footage of a genuine surge would teach the rule that
+surging is normal.
+
 Usage
 -----
     python train_lstm.py --video videos/crowd_test.mp4
@@ -62,7 +70,16 @@ MAX_PLAUSIBLE_COUNT = 1200.0
 # These thresholds are expressed relative to the count scale so they stay
 # meaningful across resolutions.
 SURGE_RATE = 0.015        # fractional growth in count per frame
-TURBULENCE_RATE = 0.020   # normalised std of frame-to-frame density change
+
+# A window is turbulent when its frame-to-frame variability is this many times
+# what CSRNet's own counting noise produces on a static crowd. An absolute
+# threshold does not work: the estimator's noise alone (about 4% of the count
+# per frame on 1080p footage) sits above any small fixed cut-off, which made
+# every dense crowd look turbulent and therefore CRITICAL.
+TURBULENCE_RATIO = 1.6
+
+# Fallback per-frame relative counting noise when calibration is skipped.
+DEFAULT_MEASUREMENT_JITTER = 0.02
 
 
 def window_dynamics(window: np.ndarray):
@@ -84,13 +101,18 @@ def window_dynamics(window: np.ndarray):
     return final_count, growth_rate, turbulence
 
 
-def label_window(window: np.ndarray) -> int:
+def label_window(window: np.ndarray, measurement_jitter: float) -> int:
     """Assign a risk class to one feature window.
+
+    ``measurement_jitter`` is CSRNet's per-frame relative counting noise. Pure
+    noise of that size gives a frame-to-frame turbulence of jitter * sqrt(2),
+    so that is the baseline turbulence is judged against.
 
     Returns 0 SAFE, 1 WARNING, 2 CRITICAL.
     """
     count, growth, turbulence = window_dynamics(window)
-    unstable = growth > SURGE_RATE or turbulence > TURBULENCE_RATE
+    noise_turbulence = measurement_jitter * np.sqrt(2.0)
+    unstable = growth > SURGE_RATE or turbulence > TURBULENCE_RATIO * noise_turbulence
 
     if count < SPARSE_THRESHOLD:
         # Too few people present for a crush regardless of how they are moving.
@@ -105,21 +127,26 @@ def label_window(window: np.ndarray) -> int:
 # Scenario generation
 # ---------------------------------------------------------------------------
 
+# Crowd dynamics per scenario. Turbulence is the size of genuine random motion
+# in the crowd, expressed as a multiple of the measured counting noise so that
+# "calm" and "turbulent" stay distinguishable whatever the camera's noise level.
+# Measurement noise itself is added separately to every scenario at the
+# calibrated level, because it is a property of the estimator, not the crowd.
 SCENARIOS = (
-    # name,             base_count, trend_per_frame, turbulence, jitter
-    ("empty_plaza",           12.0,           0.000,      0.004,  0.02),
-    ("stable_sparse",          30.0,           0.000,      0.004,  0.02),
-    ("sparse_drift",           55.0,           0.002,      0.006,  0.03),
-    ("sparse_churn",           45.0,           0.000,      0.025,  0.04),
-    ("stable_medium",        160.0,           0.000,      0.005,  0.02),
-    ("stable_dense",         330.0,           0.000,      0.005,  0.02),
-    ("gradual_fill",          90.0,           0.008,      0.006,  0.02),
-    ("dispersal",            300.0,          -0.012,      0.008,  0.03),
-    ("medium_surge",         170.0,           0.022,      0.012,  0.03),
-    ("dense_surge",          290.0,           0.028,      0.018,  0.04),
-    ("turbulent_dense",      320.0,           0.002,      0.035,  0.05),
-    ("turbulent_medium",     150.0,           0.002,      0.030,  0.05),
-    ("sparse_influx",         40.0,           0.020,      0.010,  0.03),
+    # name,             base_count, trend_per_frame, turbulence (x noise)
+    ("empty_plaza",           12.0,           0.000,   0.2),
+    ("stable_sparse",         30.0,           0.000,   0.2),
+    ("sparse_drift",          55.0,           0.002,   0.3),
+    ("sparse_churn",          45.0,           0.000,   3.0),
+    ("stable_medium",        160.0,           0.000,   0.2),
+    ("stable_dense",         330.0,           0.000,   0.2),
+    ("gradual_fill",          90.0,           0.008,   0.3),
+    ("dispersal",            300.0,          -0.012,   0.4),
+    ("medium_surge",         170.0,           0.022,   0.6),
+    ("dense_surge",          290.0,           0.028,   0.6),
+    ("turbulent_dense",      320.0,           0.002,   3.0),
+    ("turbulent_medium",     150.0,           0.002,   3.0),
+    ("sparse_influx",         40.0,           0.020,   0.5),
 )
 
 
@@ -157,13 +184,13 @@ def synthesise_scenario(rng, base_count, trend, turbulence, jitter,
     return np.stack([counts, avg_density, deltas, spatial_var], axis=1)
 
 
-def windows_from_track(track, seq_len, stride=1):
+def windows_from_track(track, seq_len, measurement_jitter, stride=1):
     """Slice a scenario track into overlapping windows plus their labels."""
     xs, ys = [], []
     for start in range(0, len(track) - seq_len + 1, stride):
         window = track[start:start + seq_len]
         xs.append(window)
-        ys.append(label_window(window))
+        ys.append(label_window(window, measurement_jitter))
     return xs, ys
 
 
@@ -174,7 +201,7 @@ def windows_from_track(track, seq_len, stride=1):
 def calibrate_from_video(video_path, max_frames, verbose=True):
     """Measure the real pipeline's feature scales so synthetic data matches it.
 
-    Returns ``(density_pixels, variance_ratio, real_track)``.
+    Returns ``(density_pixels, variance_ratio, measurement_jitter, real_track)``.
     """
     from centinal.video import extract_video_features
 
@@ -189,15 +216,23 @@ def calibrate_from_video(video_path, max_frames, verbose=True):
     density_pixels = float(np.median(counts / np.maximum(avg_density, 1e-12)))
     variance_ratio = float(np.median(spatial_var / np.maximum(avg_density ** 2, 1e-12)))
 
+    # Per-frame counting noise: on a calm crowd, frame-to-frame changes are
+    # dominated by estimator noise, and the std of differences of iid noise is
+    # sqrt(2) times the noise itself.
+    per_window = [np.std(np.diff(counts[i:i + SEQ_LEN])) / max(np.mean(counts[i:i + SEQ_LEN]), 1.0)
+                  for i in range(0, max(len(counts) - SEQ_LEN + 1, 1))]
+    measurement_jitter = float(np.median(per_window) / np.sqrt(2.0))
+
     if verbose:
         print(f"  frames={len(track)}  count range {counts.min():.0f}-{counts.max():.0f}")
         print(f"  density map pixels ~= {density_pixels:.0f}")
         print(f"  variance / density^2 ~= {variance_ratio:.3f}")
-    return density_pixels, variance_ratio, track
+        print(f"  counting noise ~= {measurement_jitter * 100:.2f}% per frame")
+    return density_pixels, variance_ratio, measurement_jitter, track
 
 
-def build_dataset(rng, density_pixels, variance_ratio, tracks_per_scenario,
-                  frames_per_track, seq_len):
+def build_dataset(rng, density_pixels, variance_ratio, measurement_jitter,
+                  tracks_per_scenario, frames_per_track, seq_len):
     """Generate scenario tracks and split them so no track spans two splits.
 
     Overlapping windows from the same track are highly correlated. Splitting at
@@ -206,10 +241,11 @@ def build_dataset(rng, density_pixels, variance_ratio, tracks_per_scenario,
     """
     per_split = {"train": [], "val": [], "test": []}
 
-    for name, base, trend, turb, jitter in SCENARIOS:
+    for name, base, trend, turb_multiple in SCENARIOS:
         for i in range(tracks_per_scenario):
-            track = synthesise_scenario(rng, base, trend, turb, jitter,
-                                        frames_per_track, density_pixels, variance_ratio)
+            track = synthesise_scenario(rng, base, trend, turb_multiple * measurement_jitter,
+                                        measurement_jitter, frames_per_track,
+                                        density_pixels, variance_ratio)
             # Deterministic 70/15/15 split over each scenario's tracks.
             frac = i / tracks_per_scenario
             split = "train" if frac < 0.70 else ("val" if frac < 0.85 else "test")
@@ -219,7 +255,7 @@ def build_dataset(rng, density_pixels, variance_ratio, tracks_per_scenario,
     for split, tracks in per_split.items():
         xs, ys = [], []
         for track in tracks:
-            wx, wy = windows_from_track(track, seq_len)
+            wx, wy = windows_from_track(track, seq_len, measurement_jitter)
             xs.extend(wx)
             ys.extend(wy)
         out[split] = (np.stack(xs), np.array(ys, dtype=np.int64))
@@ -255,11 +291,14 @@ def main():
     if args.skip_calibration or not os.path.exists(video_path):
         # 1920x1080 -> CSRNet density map is 1/8 scale -> 240 x 135 pixels.
         density_pixels, variance_ratio = 240.0 * 135.0, 0.35
-        print(f"Skipping calibration; assuming {density_pixels:.0f} density pixels.")
+        measurement_jitter = DEFAULT_MEASUREMENT_JITTER
+        print(f"Skipping calibration; assuming {density_pixels:.0f} density pixels "
+              f"and {measurement_jitter * 100:.1f}% counting noise.")
     else:
-        density_pixels, variance_ratio, _ = calibrate_from_video(video_path, args.calib_frames)
+        density_pixels, variance_ratio, measurement_jitter, _ = calibrate_from_video(
+            video_path, args.calib_frames)
 
-    splits = build_dataset(rng, density_pixels, variance_ratio,
+    splits = build_dataset(rng, density_pixels, variance_ratio, measurement_jitter,
                            args.tracks, args.track_frames, SEQ_LEN)
 
     x_train, y_train = splits["train"]
@@ -333,7 +372,8 @@ def main():
         "density_pixels": density_pixels,
         "variance_ratio": variance_ratio,
         "max_plausible_count": MAX_PLAUSIBLE_COUNT,
-        "label_rule": {"surge_rate": SURGE_RATE, "turbulence_rate": TURBULENCE_RATE,
+        "measurement_jitter": measurement_jitter,
+        "label_rule": {"surge_rate": SURGE_RATE, "turbulence_ratio": TURBULENCE_RATIO,
                        "sparse_threshold": SPARSE_THRESHOLD, "medium_threshold": MEDIUM_THRESHOLD},
         "labels": "rule-derived from density dynamics, not human annotation",
         "windows": {k: int(len(v[0])) for k, v in splits.items()},

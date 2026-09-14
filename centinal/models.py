@@ -16,7 +16,10 @@ from torchvision.models import vgg16
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-CSRNET_PATH = os.path.join(BASE_DIR, "csrnet_shanghai.pth")
+# Default density estimator: fine-tuned on ShanghaiTech A+B (see README).
+# csrnet_shanghai.pth is the original checkpoint, kept for comparison.
+CSRNET_PATH = os.path.join(BASE_DIR, "csrnet_centinal.pth")
+CSRNET_ORIGINAL_PATH = os.path.join(BASE_DIR, "csrnet_shanghai.pth")
 LSTM_PATH = os.path.join(BASE_DIR, "lstm", "risk_lstm.h5")
 SCALER_PATH = os.path.join(BASE_DIR, "lstm", "scaler.save")
 
